@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.vscode/
+*.code-workspace
+__tmp_plan.py

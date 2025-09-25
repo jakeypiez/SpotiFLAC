@@ -99,52 +99,104 @@ class TidalDownloader:
         except Exception as e:
             raise Exception(f"Search error: {str(e)}")
 
-    def get_track_info(self, query, isrc=None):
+    def get_track_info(self, query, isrc=None, max_retries=3):
         print(f"Fetching: {query}" + (f" (ISRC: {isrc})" if isrc else ""))
         
-        try:
-            result = self.search_tracks(query)
-            
-            if not result or not result.get("items"):
-                raise Exception(f"No tracks found for query: {query}")
-            
-            selected_track = None
-            if isrc:
-                isrc_items = [item for item in result["items"] if item.get("isrc") == isrc]
+        for attempt in range(max_retries):
+            try:
+                result = self.search_tracks(query)
                 
-                if len(isrc_items) > 1:
-                    hires_items = []
-                    for item in isrc_items:
-                        media_metadata = item.get("mediaMetadata", {})
-                        tags = media_metadata.get("tags", []) if media_metadata else []
-                        if "HIRES_LOSSLESS" in tags:
-                            hires_items.append(item)
+                if not result or not result.get("items"):
+                    # If ISRC search fails, try title + artist search as fallback
+                    if isrc and " " in query:
+                        print(f"ISRC search failed, trying title+artist search: {query}")
+                        result = self.search_tracks(query)
+                        
+                    if not result or not result.get("items"):
+                        if attempt < max_retries - 1:
+                            print(f"No tracks found, retrying... ({attempt + 1}/{max_retries})")
+                            time.sleep(1)
+                            continue
+                        else:
+                            raise Exception(f"No tracks found for query: {query}")
+                
+                selected_track = None
+                if isrc:
+                    # First try exact ISRC match
+                    isrc_items = [item for item in result["items"] if item.get("isrc") == isrc]
                     
-                    if hires_items:
-                        selected_track = hires_items[0]
-                    else:
+                    if len(isrc_items) > 1:
+                        # Multiple matches - prefer high-res
+                        hires_items = []
+                        lossless_items = []
+                        
+                        for item in isrc_items:
+                            media_metadata = item.get("mediaMetadata", {})
+                            tags = media_metadata.get("tags", []) if media_metadata else []
+                            audio_quality = item.get("audioQuality", "")
+                            
+                            if "HIRES_LOSSLESS" in tags:
+                                hires_items.append(item)
+                            elif audio_quality in ["LOSSLESS", "HI_RES"]:
+                                lossless_items.append(item)
+                        
+                        if hires_items:
+                            selected_track = hires_items[0]
+                            print(f"Selected hi-res version")
+                        elif lossless_items:
+                            selected_track = lossless_items[0]
+                            print(f"Selected lossless version")
+                        else:
+                            selected_track = isrc_items[0]
+                            print(f"Selected standard version")
+                            
+                    elif len(isrc_items) == 1:
                         selected_track = isrc_items[0]
-                elif len(isrc_items) == 1:
-                    selected_track = isrc_items[0]
+                        print(f"Found exact ISRC match")
+                    else:
+                        # No ISRC match, fall back to fuzzy matching by title similarity
+                        query_lower = query.lower()
+                        best_match = None
+                        best_score = 0
+                        
+                        for item in result["items"][:10]:  # Check top 10 results
+                            title = item.get('title', '').lower()
+                            # Simple similarity scoring
+                            if query_lower in title or title in query_lower:
+                                score = len(set(query_lower.split()) & set(title.split()))
+                                if score > best_score:
+                                    best_score = score
+                                    best_match = item
+                        
+                        selected_track = best_match if best_match else result["items"][0]
+                        print(f"Used fuzzy matching (score: {best_score})")
                 else:
                     selected_track = result["items"][0]
-            else:
-                selected_track = result["items"][0]
+                    
+                if not selected_track:
+                    if attempt < max_retries - 1:
+                        print(f"Track selection failed, retrying... ({attempt + 1}/{max_retries})")
+                        time.sleep(1)
+                        continue
+                    else:
+                        raise Exception(f"Track not found: {query}" + (f" (ISRC: {isrc})" if isrc else ""))
+                    
+                title = selected_track.get('title', 'Unknown')
+                quality = selected_track.get('audioQuality', 'Unknown')
+                print(f"Found: {title} ({quality})")
+                return selected_track
                 
-            if not selected_track:
-                raise Exception(f"Track not found: {query}" + (f" (ISRC: {isrc})" if isrc else ""))
-                
-            title = selected_track.get('title', 'Unknown')
-            quality = selected_track.get('audioQuality', 'Unknown')
-            print(f"Found: {title} ({quality})")
-            return selected_track
-            
-        except Exception as e:
-            raise Exception(f"Error getting track info: {str(e)}")
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"Search error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+                    time.sleep(2)
+                    continue
+                else:
+                    raise Exception(f"Error getting track info after {max_retries} retries: {str(e)}")
 
     def get_download_url(self, track_id, quality="LOSSLESS"):
         print("Fetching URL...")
-        download_api_url = f"https://tidal.401658.xyz/track/?id={track_id}&quality={quality}"
+        download_api_url = f"https://hifi.401658.xyz/track/?id={track_id}&quality={quality}"
         
         try:
             response = requests.get(download_api_url, timeout=self.timeout)

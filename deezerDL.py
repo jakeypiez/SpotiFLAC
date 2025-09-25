@@ -2,39 +2,60 @@ import requests
 import asyncio
 import os
 import sys
+import time
 from mutagen.flac import FLAC
-from random import randrange
-
-def get_random_user_agent():
-    return f"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_{randrange(11, 15)}_{randrange(4, 9)}) AppleWebKit/{randrange(530, 537)}.{randrange(30, 37)} (KHTML, like Gecko) Chrome/{randrange(80, 105)}.0.{randrange(3000, 4500)}.{randrange(60, 125)} Safari/{randrange(530, 537)}.{randrange(30, 36)}"
 
 class DeezerDownloader:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': get_random_user_agent()
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         })
         self.progress_callback = None
     
     def set_progress_callback(self, callback):
         self.progress_callback = callback
     
-    def get_track_by_isrc(self, isrc):
-        try:
-            url = f"https://api.deezer.com/2.0/track/isrc:{isrc}"
-            response = self.session.get(url)
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            if 'error' in data:
-                print(f"Error from Deezer API: {data['error']['message']}")
-                return None
-            
-            return data
-        except requests.exceptions.RequestException as e:
-            print(f"Error fetching track data: {e}")
-            return None
+    def get_track_by_isrc(self, isrc, max_retries=3):
+        for attempt in range(max_retries):
+            try:
+                url = f"https://api.deezer.com/2.0/track/isrc:{isrc}"
+                response = self.session.get(url, timeout=15)
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if 'error' in data:
+                    error_msg = data['error'].get('message', 'Unknown Deezer API error')
+                    if attempt < max_retries - 1:
+                        print(f"Deezer API error (attempt {attempt + 1}/{max_retries}): {error_msg}")
+                        time.sleep(2)
+                        continue
+                    else:
+                        print(f"Error from Deezer API after {max_retries} attempts: {error_msg}")
+                        return None
+                
+                return data
+                
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    print(f"Deezer API timeout (attempt {attempt + 1}/{max_retries})")
+                    time.sleep(3)
+                    continue
+                else:
+                    print(f"Error fetching track data: timeout after {max_retries} attempts")
+                    return None
+                    
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    print(f"Deezer API request error (attempt {attempt + 1}/{max_retries}): {e}")
+                    time.sleep(2)
+                    continue
+                else:
+                    print(f"Error fetching track data after {max_retries} attempts: {e}")
+                    return None
+        
+        return None
     
     def extract_metadata(self, track_data):
         metadata = {}
