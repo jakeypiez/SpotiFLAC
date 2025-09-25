@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QLabel, QFileDialog, QListWidget, QTextEdit, QTabWidget, QButtonGroup, QRadioButton,
     QAbstractItemView, QProgressBar, QCheckBox, QDialog, QFrame,
     QDialogButtonBox, QComboBox, QStyledItemDelegate, QGridLayout,
-    QGraphicsDropShadowEffect
+    QGraphicsDropShadowEffect, QSizePolicy
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QUrl, QTimer, QTime, QSettings, QSize
 from PyQt6.QtGui import QIcon, QTextCursor, QDesktopServices, QPixmap, QBrush, QColor
@@ -1630,8 +1630,18 @@ class SpotiFLACGUI(QWidget):
 
     def setup_process_tab(self):
         self.process_tab = QWidget()
-        process_layout = QVBoxLayout()
-        process_layout.setSpacing(10)
+        tab_layout = QVBoxLayout()
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(12)
+
+        process_card = QFrame()
+        process_card.setObjectName('inputCard')
+        process_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.apply_card_shadow(process_card, blur=38, y_offset=16, alpha=110)
+
+        process_layout = QVBoxLayout(process_card)
+        process_layout.setContentsMargins(18, 18, 18, 18)
+        process_layout.setSpacing(18)
 
         self.log_output = QTextEdit()
         self.log_output.setObjectName('terminalLog')
@@ -1639,10 +1649,14 @@ class SpotiFLACGUI(QWidget):
         self.log_output.setPlaceholderText('Live download log will appear here.')
         self.log_output.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.log_output.document().setMaximumBlockCount(3000)
+        self.log_output.setMinimumHeight(220)
+        self.log_output.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         process_layout.addWidget(self.log_output)
 
         log_controls = QHBoxLayout()
+        log_controls.setSpacing(12)
         log_controls.addStretch()
+
         self.copy_log_btn = QPushButton('Copy Log')
         self.copy_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.copy_log_btn.clicked.connect(self.copy_log_to_clipboard)
@@ -1652,23 +1666,26 @@ class SpotiFLACGUI(QWidget):
         self.clear_log_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.clear_log_btn.clicked.connect(self.clear_log_output)
         log_controls.addWidget(self.clear_log_btn)
+
         process_layout.addLayout(log_controls)
 
         self.setup_metrics_panel(process_layout)
 
-        progress_time_layout = QVBoxLayout()
-        progress_time_layout.setSpacing(2)
+        progress_layout = QVBoxLayout()
+        progress_layout.setSpacing(6)
 
         self.progress_bar = QProgressBar()
-        progress_time_layout.addWidget(self.progress_bar)
+        self.progress_bar.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        progress_layout.addWidget(self.progress_bar)
 
         self.time_label = QLabel('00:00:00')
         self.time_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        progress_time_layout.addWidget(self.time_label)
+        progress_layout.addWidget(self.time_label)
 
-        process_layout.addLayout(progress_time_layout)
+        process_layout.addLayout(progress_layout)
 
         control_layout = QHBoxLayout()
+        control_layout.setSpacing(12)
         self.stop_btn = QPushButton('Stop')
         self.stop_btn.setProperty('accent', True)
         self.pause_resume_btn = QPushButton('Pause')
@@ -1689,8 +1706,8 @@ class SpotiFLACGUI(QWidget):
 
         process_layout.addLayout(control_layout)
 
-        self.process_tab.setLayout(process_layout)
-
+        tab_layout.addWidget(process_card, 1)
+        self.process_tab.setLayout(tab_layout)
         self.tab_widget.addTab(self.process_tab, 'Process')
 
         self.progress_bar.hide()
@@ -1698,9 +1715,11 @@ class SpotiFLACGUI(QWidget):
         self.stop_btn.hide()
         self.pause_resume_btn.hide()
 
+
     def setup_metrics_panel(self, parent_layout):
         self.metrics_panel = QFrame()
         self.metrics_panel.setObjectName('metricsPanel')
+        self.metrics_panel.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         metrics_layout = QGridLayout(self.metrics_panel)
         metrics_layout.setContentsMargins(20, 14, 20, 14)
         metrics_layout.setHorizontalSpacing(28)
