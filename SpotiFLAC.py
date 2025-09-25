@@ -204,6 +204,175 @@ class TrackSearchWorker(QThread):
         self.is_stopped = True
 
 
+class MultiSourceFetchWorker(QThread):
+    finished = pyqtSignal(list, dict)
+    progress = pyqtSignal(str)
+    error = pyqtSignal(str)
+
+    def __init__(self, spotify_urls, playlist_files, parse_m3u, parse_pls, parse_simple, parent=None):
+        super().__init__(parent)
+        self.spotify_urls = list(spotify_urls)
+        self.playlist_files = list(playlist_files)
+        self.parse_m3u = parse_m3u
+        self.parse_pls = parse_pls
+        self.parse_simple = parse_simple
+
+    def run(self):
+        try:
+            if not self.spotify_urls and not self.playlist_files:
+                self.error.emit('Error: No sources provided.')
+                return
+
+            all_tracks = []
+            total_sources = len(self.spotify_urls) + len(self.playlist_files)
+
+            self.progress.emit(f"Processing {len(self.spotify_urls)} Spotify URLs and {len(self.playlist_files)} playlist files...")
+
+            for index, url in enumerate(self.spotify_urls, start=1):
+                try:
+                    preview = f"{url[:50]}{'...' if len(url) > 50 else ''}"
+                    self.progress.emit(f"Fetching Spotify URL {index}/{len(self.spotify_urls)}: {preview}")
+
+                    metadata = get_filtered_data(url)
+                    if "error" in metadata:
+                        self.progress.emit(f"Error with URL {index}: {metadata['error']}")
+                        continue
+
+                    url_info = parse_uri(url)
+                    tracks_from_url = []
+                    source_name = ''
+                    source_type = ''
+
+                    if url_info["type"] == "track":
+                        track_data = metadata["track"]
+                        track_id = track_data["external_urls"].split("/")[-1]
+                        source_name = f"{track_data['name']} - {track_data['artists']}"
+                        source_type = "spotify_track"
+                        tracks_from_url = [
+                            Track(
+                                external_urls=track_data["external_urls"],
+                                title=track_data["name"],
+                                artists=track_data["artists"],
+                                album=track_data["album_name"],
+                                track_number=1,
+                                duration_ms=track_data.get("duration_ms", 0),
+                                id=track_id,
+                                isrc=track_data.get("isrc", ""),
+                                source_name=source_name,
+                                source_type=source_type
+                            )
+                        ]
+
+                    elif url_info["type"] == "album":
+                        album_data = metadata
+                        source_name = album_data["album_info"]["name"]
+                        source_type = "spotify_album"
+
+                        for track in album_data["track_list"]:
+                            track_id = track["external_urls"].split("/")[-1]
+                            tracks_from_url.append(
+                                Track(
+                                    external_urls=track["external_urls"],
+                                    title=track["name"],
+                                    artists=track["artists"],
+                                    album=track["album_name"],
+                                    track_number=track["track_number"],
+                                    duration_ms=track.get("duration_ms", 0),
+                                    id=track_id,
+                                    isrc=track.get("isrc", ""),
+                                    source_name=source_name,
+                                    source_type=source_type
+                                )
+                            )
+
+                    elif url_info["type"] == "playlist":
+                        playlist_data = metadata
+                        source_name = playlist_data["playlist_info"]["owner"]["name"]
+                        source_type = "spotify_playlist"
+
+                        for position, track in enumerate(playlist_data["track_list"], start=1):
+                            track_id = track["external_urls"].split("/")[-1]
+                            tracks_from_url.append(
+                                Track(
+                                    external_urls=track["external_urls"],
+                                    title=track["name"],
+                                    artists=track["artists"],
+                                    album=track["album_name"],
+                                    track_number=position,
+                                    duration_ms=track.get("duration_ms", 0),
+                                    id=track_id,
+                                    isrc=track.get("isrc", ""),
+                                    source_name=source_name,
+                                    source_type=source_type
+                                )
+                            )
+
+                    if tracks_from_url:
+                        all_tracks.extend(tracks_from_url)
+                        self.progress.emit(f"Added {len(tracks_from_url)} tracks from Spotify {url_info['type']}: {source_name}")
+
+                except Exception as exc:
+                    self.progress.emit(f"Error processing Spotify URL {index}: {exc}")
+                    continue
+
+            for index, file_path in enumerate(self.playlist_files, start=1):
+                try:
+                    filename = os.path.basename(file_path)
+                    self.progress.emit(f"Processing playlist file {index}/{len(self.playlist_files)}: {filename}")
+
+                    file_ext = os.path.splitext(file_path)[1].lower()
+                    if file_ext in ['.m3u', '.m3u8']:
+                        tracks_from_file = self.parse_m3u(file_path)
+                    elif file_ext == '.pls':
+                        tracks_from_file = self.parse_pls(file_path)
+                    else:
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as handle:
+                                content = handle.read(1000)
+                            if '[playlist]' in content.lower():
+                                tracks_from_file = self.parse_pls(file_path)
+                            elif '#EXTM3U' in content or '#EXTINF' in content:
+                                tracks_from_file = self.parse_m3u(file_path)
+                            else:
+                                tracks_from_file = self.parse_simple(file_path)
+                        except Exception:
+                            tracks_from_file = self.parse_simple(file_path)
+
+                    source_name = os.path.splitext(filename)[0]
+                    for position, track in enumerate(tracks_from_file, start=1):
+                        track.track_number = position
+                        track.source_name = source_name
+                        track.source_type = "playlist_file"
+                        all_tracks.append(track)
+
+                    self.progress.emit(f"Added {len(tracks_from_file)} tracks from playlist file: {source_name}")
+
+                except Exception as exc:
+                    self.progress.emit(f"Error processing playlist file {index}: {exc}")
+                    continue
+
+            if not all_tracks:
+                self.error.emit('Error: No valid tracks found from any source.')
+                return
+
+            metadata = {
+                'title': 'Multi-Source Collection',
+                'artists': f"{len(all_tracks)} tracks from {total_sources} sources",
+                'cover': '',
+                'total_tracks': len(all_tracks)
+            }
+
+            context = {
+                'metadata': metadata,
+                'total_sources': total_sources,
+                'album_name': f"Multi-Source Collection ({total_sources} sources)"
+            }
+
+            self.finished.emit(all_tracks, context)
+
+        except Exception as exc:
+            self.error.emit(f"Error: Failed to process sources: {exc}")
+
 class DownloadWorker(QThread):
     finished = pyqtSignal(bool, str, list)
     progress = pyqtSignal(str, int)
@@ -1087,10 +1256,11 @@ class SpotiFLACGUI(QWidget):
         super().__init__()
         self.setObjectName('rootWindow')
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.current_version = "4.4"
+        self.current_version = "4.6"
         self.tracks = []
         self.all_tracks = []  
         self.reset_state()
+        self.multi_fetch_worker = None
         
         self.settings = QSettings('SpotiFLAC', 'Settings')
         self.last_output_path = self.settings.value('output_path', str(Path.home() / "Music"))
@@ -2162,8 +2332,8 @@ class SpotiFLACGUI(QWidget):
         about_layout.setSpacing(15)
 
         sections = [
-            ("Check for Updates", "Check", "https://github.com/afkarxyz/SpotiFLAC/releases"),
-            ("Report an Issue", "Report", "https://github.com/afkarxyz/SpotiFLAC/issues")
+            ("Check for Updates", "Check", "https://github.com/jakeypiez/SpotiFLAC/releases"),
+            ("Report an Issue", "Report", "https://github.com/jakeypiez/SpotiFLAC/issues")
         ]
 
         for title, button_text, url in sections:
@@ -2583,189 +2753,100 @@ class SpotiFLACGUI(QWidget):
             self.log_output.append(f'Error: Failed to start multi-source fetch: {str(e)}')
     
     def process_multiple_sources(self, spotify_urls, playlist_files):
-        """Process multiple Spotify URLs and playlist files with source tracking"""
-        all_tracks = []
-        total_sources = len(spotify_urls) + len(playlist_files)
-        
-        self.log_output.append(f'Processing {len(spotify_urls)} Spotify URLs and {len(playlist_files)} playlist files...')
-        
-        # Process Spotify URLs first
-        for i, url in enumerate(spotify_urls):
-            try:
-                self.log_output.append(f'Fetching Spotify URL {i+1}/{len(spotify_urls)}: {url[:50]}...')
-                
-                # Get metadata for each URL
-                metadata = get_filtered_data(url)
-                if "error" in metadata:
-                    self.log_output.append(f'Error with URL {i+1}: {metadata["error"]}')
-                    continue
-                
-                url_info = parse_uri(url)
-                tracks_from_url = []
-                source_name = ""
-                source_type = ""
-                
-                if url_info["type"] == "track":
-                    # Single track
-                    track_data = metadata["track"]
-                    track_id = track_data["external_urls"].split("/")[-1]
-                    source_name = f"{track_data['name']} - {track_data['artists']}"
-                    source_type = "spotify_track"
-                    
-                    track = Track(
-                        external_urls=track_data["external_urls"],
-                        title=track_data["name"],
-                        artists=track_data["artists"],
-                        album=track_data["album_name"],
-                        track_number=1,
-                        duration_ms=track_data.get("duration_ms", 0),
-                        id=track_id,
-                        isrc=track_data.get("isrc", ""),
-                        source_name=source_name,
-                        source_type=source_type
-                    )
-                    tracks_from_url = [track]
-                    
-                elif url_info["type"] == "album":
-                    # Album tracks
-                    album_data = metadata
-                    source_name = album_data["album_info"]["name"]
-                    source_type = "spotify_album"
-                    
-                    for j, track in enumerate(album_data["track_list"]):
-                        track_id = track["external_urls"].split("/")[-1]
-                        
-                        track_obj = Track(
-                            external_urls=track["external_urls"],
-                            title=track["name"],
-                            artists=track["artists"],
-                            album=track["album_name"],
-                            track_number=track["track_number"],
-                            duration_ms=track.get("duration_ms", 0),
-                            id=track_id,
-                            isrc=track.get("isrc", ""),
-                            source_name=source_name,
-                            source_type=source_type
-                        )
-                        tracks_from_url.append(track_obj)
-                        
-                elif url_info["type"] == "playlist":
-                    # Playlist tracks
-                    playlist_data = metadata
-                    source_name = playlist_data["playlist_info"]["owner"]["name"]  # Fixed: correct path to playlist name
-                    source_type = "spotify_playlist"
-                    
-                    for j, track in enumerate(playlist_data["track_list"]):
-                        track_id = track["external_urls"].split("/")[-1]
-                        
-                        track_obj = Track(
-                            external_urls=track["external_urls"],
-                            title=track["name"],
-                            artists=track["artists"],
-                            album=track["album_name"],
-                            track_number=j + 1,
-                            duration_ms=track.get("duration_ms", 0),
-                            id=track_id,
-                            isrc=track.get("isrc", ""),
-                            source_name=source_name,
-                            source_type=source_type
-                        )
-                        tracks_from_url.append(track_obj)
-                
-                all_tracks.extend(tracks_from_url)
-                self.log_output.append(f'Added {len(tracks_from_url)} tracks from Spotify {url_info["type"]}: {source_name}')
-                
-            except Exception as e:
-                self.log_output.append(f'Error processing Spotify URL {i+1}: {str(e)}')
-                continue
-        
-        # Process playlist files
-        for i, file_path in enumerate(playlist_files):
-            try:
-                filename = os.path.basename(file_path)
-                self.log_output.append(f'Processing playlist file {i+1}/{len(playlist_files)}: {filename}')
-                
-                # Parse playlist file
-                file_ext = os.path.splitext(file_path)[1].lower()
-                
-                if file_ext in ['.m3u', '.m3u8']:
-                    tracks_from_file = self.parse_m3u_file(file_path)
-                elif file_ext == '.pls':
-                    tracks_from_file = self.parse_pls_file(file_path)
-                else:
-                    # Auto-detect format
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            content = f.read(1000)
-                        
-                        if '[playlist]' in content.lower():
-                            tracks_from_file = self.parse_pls_file(file_path)
-                        elif '#EXTM3U' in content or '#EXTINF' in content:
-                            tracks_from_file = self.parse_m3u_file(file_path)
-                        else:
-                            tracks_from_file = self.parse_simple_playlist(file_path)
-                    except Exception:
-                        tracks_from_file = self.parse_simple_playlist(file_path)
-                
-                # Set source information for playlist file tracks
-                source_name = os.path.splitext(filename)[0]  # Use filename without extension
-                source_type = "playlist_file"
-                
-                for j, track in enumerate(tracks_from_file):
-                    track.track_number = j + 1  # Reset numbering per source
-                    track.source_name = source_name
-                    track.source_type = source_type
-                    all_tracks.append(track)
-                    
-                self.log_output.append(f'Added {len(tracks_from_file)} tracks from playlist file: {source_name}')
-                
-            except Exception as e:
-                self.log_output.append(f'Error processing playlist file {i+1}: {str(e)}')
-                continue
-        
-        if not all_tracks:
-            self.log_output.append('Error: No valid tracks found from any source.')
+        if self.multi_fetch_worker and self.multi_fetch_worker.isRunning():
+            self.log_output.append('Warning: A multi-source fetch is already running. Please wait for it to finish.')
+            self.log_output.moveCursor(QTextCursor.MoveOperation.End)
             return
-            
-        # Set up for multi-source processing
-        self.tracks = all_tracks
-        self.all_tracks = all_tracks.copy()
-        self.is_playlist = True  # Treat as playlist for multi-source
-        self.is_album = self.is_single_track = False
-        self.album_or_playlist_name = f"Multi-Source Collection ({total_sources} sources)"
-        
-        # Create combined metadata for display
-        metadata = {
-            'title': f"Multi-Source Collection",
-            'artists': f"{len(all_tracks)} tracks from {total_sources} sources",
-            'cover': '',  # No cover for multi-source
-            'total_tracks': len(all_tracks)
-        }
-        
+
+        self.fetch_btn.setEnabled(False)
+        self.multi_fetch_worker = MultiSourceFetchWorker(
+            spotify_urls,
+            playlist_files,
+            self.parse_m3u_file,
+            self.parse_pls_file,
+            self.parse_simple_playlist,
+            self
+        )
+        self.multi_fetch_worker.progress.connect(self.on_multi_fetch_progress)
+        self.multi_fetch_worker.error.connect(self.on_multi_fetch_error)
+        self.multi_fetch_worker.finished.connect(self.on_multi_fetch_finished)
+        self.multi_fetch_worker.start()
+
+    def on_multi_fetch_progress(self, message):
+        if not message:
+            return
+        self.log_output.append(message)
+        self.log_output.moveCursor(QTextCursor.MoveOperation.End)
+
+    def on_multi_fetch_error(self, message):
+        if message:
+            self.log_output.append(message)
+            self.log_output.moveCursor(QTextCursor.MoveOperation.End)
+        if self.multi_fetch_worker:
+            if self.multi_fetch_worker.isRunning():
+                self.multi_fetch_worker.quit()
+                self.multi_fetch_worker.wait()
+            self.multi_fetch_worker = None
+        self.fetch_btn.setEnabled(True)
+
+    def on_multi_fetch_finished(self, tracks, context):
+        self.fetch_btn.setEnabled(True)
+        self.multi_fetch_worker = None
+
+        if not tracks:
+            self.log_output.append('Error: No valid tracks found from any source.')
+            self.log_output.moveCursor(QTextCursor.MoveOperation.End)
+            return
+
+        total_sources = 1
+        metadata = None
+        album_name = None
+        if isinstance(context, dict):
+            metadata = context.get('metadata')
+            total_sources = context.get('total_sources', total_sources)
+            album_name = context.get('album_name')
+
+        if metadata is None:
+            metadata = {
+                'title': 'Multi-Source Collection',
+                'artists': f"{len(tracks)} tracks from {total_sources} sources",
+                'cover': '',
+                'total_tracks': len(tracks)
+            }
+
+        if not album_name:
+            album_name = f"Multi-Source Collection ({total_sources} sources)"
+
+        self.tracks = tracks
+        self.all_tracks = tracks.copy()
+        self.is_playlist = True
+        self.is_album = False
+        self.is_single_track = False
+        self.album_or_playlist_name = album_name
+
         self.update_display_after_fetch(metadata)
-        
-        # Count tracks that need streaming service search (no ISRC)
-        tracks_needing_search = [track for track in all_tracks if not track.isrc]
-        tracks_ready = [track for track in all_tracks if track.isrc]
-        
+        self.update_button_states()
+
+        tracks_needing_search = [track for track in tracks if not track.isrc]
+        tracks_ready = len(tracks) - len(tracks_needing_search)
+
         if tracks_needing_search:
             self.log_output.append(f'\nAutomatically searching for {len(tracks_needing_search)} tracks on streaming services...')
-            self.log_output.append(f'{len(tracks_ready)} tracks already have streaming IDs and are ready.')
+            if tracks_ready:
+                self.log_output.append(f'{tracks_ready} tracks already have streaming IDs and are ready.')
+            self.log_output.moveCursor(QTextCursor.MoveOperation.End)
             self.auto_fetch_track_ids()
         else:
-            self.log_output.append(f'\nAll {len(tracks_ready)} tracks have streaming IDs and are ready to download!')
-            self.log_output.append(f'Automatically starting download for all {len(tracks_ready)} tracks...')
-            
-            # Automatically start downloading when all tracks are ready
+            self.log_output.append(f'\nAll {len(tracks)} tracks have streaming IDs and are ready to download!')
+            self.log_output.append(f'Automatically starting download for all {len(tracks)} tracks...')
+            self.log_output.moveCursor(QTextCursor.MoveOperation.End)
             try:
-                # Switch to dashboard to show tracks
                 self.tab_widget.setCurrentIndex(0)
-                # Trigger automatic download
                 self.download_all()
             except Exception as e:
                 self.log_output.append(f'Error: Failed to start automatic download: {str(e)}')
                 self.tab_widget.setCurrentIndex(0)
-    
+                self.log_output.moveCursor(QTextCursor.MoveOperation.End)
     def on_metadata_fetched(self, metadata):
         try:
             url_info = parse_uri(self.spotify_url.text().strip())
@@ -3318,6 +3399,10 @@ class SpotiFLACGUI(QWidget):
                     checker.quit()
                     checker.wait()
         
+        if hasattr(self, 'multi_fetch_worker') and self.multi_fetch_worker and self.multi_fetch_worker.isRunning():
+            self.multi_fetch_worker.quit()
+            self.multi_fetch_worker.wait()
+
         if hasattr(self, 'worker') and self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.quit()
