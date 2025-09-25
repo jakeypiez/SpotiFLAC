@@ -1127,7 +1127,7 @@ class SpotiFLACGUI(QWidget):
 
     def check_updates(self):
         try:
-            response = requests.get("https://raw.githubusercontent.com/afkarxyz/SpotiFLAC/refs/heads/main/version.json")
+            response = requests.get("https://raw.githubusercontent.com/jakeypiez/SpotiFLAC/refs/heads/main/version.json")
             if response.status_code == 200:
                 data = response.json()
                 new_version = data.get("version")
@@ -1137,7 +1137,7 @@ class SpotiFLACGUI(QWidget):
                     result = dialog.exec()
                     
                     if result == QDialog.DialogCode.Accepted:
-                        QDesktopServices.openUrl(QUrl("https://github.com/afkarxyz/SpotiFLAC/releases"))
+                        QDesktopServices.openUrl(QUrl("https://github.com/jakeypiez/SpotiFLAC/releases"))
                         
         except Exception as e:
             pass
